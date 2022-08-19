@@ -26,23 +26,7 @@ import java.awt.Image;
 import java.awt.geom.Ellipse2D;
 import java.awt.geom.RoundRectangle2D;
 import java.awt.image.BufferedImage;
-import java.io.BufferedReader;
-import java.io.BufferedWriter;
-import java.io.ByteArrayOutputStream;
-import java.io.File;
-import java.io.FileInputStream;
-import java.io.FileNotFoundException;
-import java.io.FileOutputStream;
-import java.io.FileReader;
-import java.io.FileWriter;
-import java.io.FilenameFilter;
-import java.io.IOException;
-import java.io.InputStreamReader;
-import java.io.OutputStreamWriter;
-import java.io.PrintStream;
-import java.io.PrintWriter;
-import java.io.Reader;
-import java.io.Writer;
+import java.io.*;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -179,6 +163,9 @@ public final class Compiler {
           RUNTIME_FILES_DIR + "viewpager.jar"
       ));
 
+  private static final String MULTIPLE_APP_LANGUAGES_NAMES =
+          ".names";
+
   private static final String LINUX_AAPT_TOOL =
       RUNTIME_TOOLS_DIR + "linux/aapt";
   private static final String LINUX_ZIPALIGN_TOOL =
@@ -246,6 +233,8 @@ public final class Compiler {
    * </code>
    */
   private final Map<String, Set<String>> compBlocks;
+  private final String projectName;
+  private final String aName;
 
   /**
    * Set of exploded AAR libraries.
@@ -863,6 +852,27 @@ public final class Compiler {
   }
 
   /**
+   * Creates the values xml file for the app name
+   * for different languages
+   */
+
+  private static void createValuesXmlLang(File directory, String appName) {
+    File stylesXml = new File(directory, "strings" + ".xml");
+    BufferedWriter out = null;
+    try {
+      out = new BufferedWriter(new OutputStreamWriter(new FileOutputStream(stylesXml), "UTF-8"));
+
+      out.write("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n");
+      out.write("<resources>\n");
+      out.write("<string name=\"app_name\">" + appName + "</string>\n");
+      out.write("</resources>\n");
+      out.close();
+    } catch (IOException e) {
+      throw new RuntimeException(e);
+    }
+  }
+
+  /**
    * Create the default color and styling for the app.
    */
   private boolean createValuesXml(File valuesDir, String suffix) {
@@ -900,10 +910,12 @@ public final class Compiler {
     colorAccent = cleanColor(colorAccent, true);
     File colorsXml = new File(valuesDir, "colors" + suffix + ".xml");
     File stylesXml = new File(valuesDir, "styles" + suffix + ".xml");
+    String labelName = aName.equals("") ? projectName : aName;
     try {
       BufferedWriter out = new BufferedWriter(new OutputStreamWriter(new FileOutputStream(colorsXml), "UTF-8"));
       out.write("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n");
       out.write("<resources>\n");
+      out.write("<string name=\"app_name\">" + labelName + "</string>\n");
       out.write("<color name=\"colorPrimary\">");
       out.write(colorPrimary);
       out.write("</color>\n");
@@ -1029,13 +1041,12 @@ public final class Compiler {
     String mainClass = project.getMainClass();
     String packageName = Signatures.getPackageName(mainClass);
     String className = Signatures.getClassName(mainClass);
-    String projectName = project.getProjectName();
     String vCode = project.getVCode();
     String vName = cleanName(project.getVName());
     if (includeDangerousPermissions) {
       vName += "u";
     }
-    String aName = cleanName(project.getAName());
+
     LOG.log(Level.INFO, "VCode: " + vCode);
     LOG.log(Level.INFO, "VName: " + vName);
 
@@ -1167,11 +1178,7 @@ public final class Compiler {
       // risk for App Inventor App end-users.
       out.write("android:debuggable=\"false\" ");
       // out.write("android:debuggable=\"true\" "); // DEBUGGING
-      if (aName.equals("")) {
-        out.write("android:label=\"" + projectName + "\" ");
-      } else {
-        out.write("android:label=\"" + aName + "\" ");
-      }
+      out.write("android:label=\"@string/app_name\" ");
       out.write("android:networkSecurityConfig=\"@xml/network_security_config\" ");
       out.write("android:requestLegacyExternalStorage=\"true\" ");  // For SDK 29 (Android Q)
       if (YaVersion.TARGET_SDK_VERSION >= 30) {
@@ -1507,6 +1514,16 @@ public final class Compiler {
         return false;
       }
 
+      HashMap<String, String> multiLangAppLabels = compiler.getAppLabelsMultiLang();
+      LOG.info("Multi App Labels = " + multiLangAppLabels);
+      for (Map.Entry<String, String> entry : multiLangAppLabels.entrySet()) {
+        String langCode = entry.getKey();
+        String name = entry.getValue();
+
+        File directory = createDir(resDir, "values-" + langCode);
+        createValuesXmlLang(directory, name);
+      }
+
       statReporter.nextStage(compiler, "createProviderXml");
       out.println("________Creating provider_path xml");
       File providerDir = createDir(resDir, "xml");
@@ -1691,6 +1708,36 @@ public final class Compiler {
     return true;
   }
 
+  private HashMap<String, String> getAppLabelsMultiLang() {
+    File file = new File(project.getAssetsDirectory(), MULTIPLE_APP_LANGUAGES_NAMES);
+    try {
+      InputStream stream = new FileInputStream(file);
+      int available = stream.available();
+      byte[] bytes = new byte[available];
+      stream.read(bytes);
+
+      String labels = new String(bytes);
+      HashMap<String, String> labelsMap = new HashMap<String, String>();
+
+      for (String label : labels.split("\n")) {
+        String[] parts = label.split("=");
+        String langCode = parts[0];
+        if (langCode.length() != 2) {
+          throw new Exception("Invalid language code");
+        }
+        String value = parts[1];
+        labelsMap.put(langCode, value);
+      }
+      return labelsMap;
+    } catch (Exception e) {
+      e.printStackTrace();
+      LOG.warning("YAIL compiler - ApkBuilder failed.");
+      err.println("YAIL compiler - ApkBuilder failed.");
+      userErrors.print(String.format(ERROR_IN_STAGE, "ApkBuilder"));
+    }
+    return null;
+  }
+
   /*
    * Creates all the animation xml files.
    */
@@ -1801,6 +1848,8 @@ public final class Compiler {
     this.dexCacheDir = dexCacheDir;
     this.reporter = reporter;
 
+    projectName = project.getProjectName();
+    aName = cleanName(project.getAName());
   }
 
   /*
